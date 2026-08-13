@@ -1290,6 +1290,23 @@ config CRYPTO_ZSTD
 
 	  See https://github.com/facebook/zstd for further information.
 
+config CRYPTO_ZSTD_LEVEL
+	int "zstd compression level (1-22)"
+	depends on CRYPTO_ZSTD
+	default 3
+	range 1 22
+	help
+	  Compression level used by the zstd crypto backend. Higher levels
+	  give better compression ratio at the cost of more CPU during
+	  compression (decompression speed is independent of the level).
+
+	  For zram swap on mobile, lower levels (1-3) save CPU/battery at
+	  a small compression-ratio cost; the default 3 matches upstream.
+
+	  This is a build-time setting inspired by the upstream
+	  algorithm_params device attribute (6.12) which exposes per-device
+	  level/dict configuration.
+
 endmenu
 
 menu "Random number generation"

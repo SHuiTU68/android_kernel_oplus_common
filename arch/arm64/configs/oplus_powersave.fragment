@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# OPLUS power-saving config fragment for MT6991 (Dimensity 9400)
+#
+# Merge this fragment into the device defconfig via the build system's
+# config-merge step (e.g. scripts/kconfig/merge_config.sh).
+#
+# These options enable the kernel-side power-saving hooks added for
+# screen-off standby and daily-use efficiency. They depend on the OPLUS
+# CPU feature modules and are not set in gki_defconfig by default.
+
+# --- Top-level OPLUS CPU feature switch ---
+CONFIG_OPLUS_FEATURE_CPU=y
+
+# --- UAG cpufreq governor (default governor on this platform) ---
+# Required so the screen-off soft_limit PM notifier compiles in.
+CONFIG_OPLUS_CPU_FREQ_GOV_UAG=y
+CONFIG_OPLUS_UAG_SOFT_LIMIT=y
+
+# --- SLC (System Level Cache) policy ---
+# Required so the suspend/resume GPU SLC ceiling release compiles in.
+CONFIG_OPLUS_FEATURE_SLC=y
+
+# --- Waker identify (screen-off wakeup-source statistics) ---
+# Enables the PM notifier that snapshots wakeup_source event_count on
+# suspend and diffs it on resume, exposing the top offenders via
+# /proc/waker_identify/screenoff_ws_stats.
+CONFIG_OPLUS_FEATURE_WAKER_IDENTIFY=y

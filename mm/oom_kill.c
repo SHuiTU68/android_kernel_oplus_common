@@ -313,6 +313,7 @@ static int oom_evaluate_task(struct task_struct *task, void *arg)
 {
 	struct oom_control *oc = arg;
 	long points;
+	bool bypass = false;
 
 	if (oom_unkillable_task(task))
 		goto next;
@@ -341,6 +342,10 @@ static int oom_evaluate_task(struct task_struct *task, void *arg)
 		points = LONG_MAX;
 		goto select;
 	}
+
+	trace_android_vh_oom_evaluate_task_bypass(task, oc, &bypass);
+	if (bypass)
+		goto next;
 
 	points = oom_badness(task, oc->totalpages);
 	if (points == LONG_MIN || points < oc->chosen_points)
@@ -705,8 +710,13 @@ static void wake_oom_reaper(struct timer_list *timer)
  * get in the way and release resources needed by the process exit path.
  * e.g. The futex robust list can sit in Anon|Private memory that gets reaped
  * before the exit path is able to wake the futex waiters.
+ *
+ * Android tuning: reduced from 2*HZ to HZ/2. On phones, the foreground
+ * stalls for the entire delay window while memory remains exhausted.
+ * A shorter delay reclaims victim memory faster and shortens the UI
+ * freeze. 500ms still gives the victim a chance for a clean exit.
  */
-#define OOM_REAPER_DELAY (2*HZ)
+#define OOM_REAPER_DELAY (HZ/2)
 static void queue_oom_reaper(struct task_struct *tsk)
 {
 	bool bypass = false;
@@ -1200,9 +1210,23 @@ bool out_of_memory(struct oom_control *oc)
 		 * If we got here due to an actual allocation at the
 		 * system level, we cannot survive this and will enter
 		 * an endless loop in the allocator. Bail out now.
+		 *
+		 * Android tuning: do NOT panic. On Android, all visible
+		 * processes may be protected by oom_score_adj=OOM_SCORE_ADJ_MIN
+		 * (system_server, persistent apps), so the kernel OOM finds
+		 * no victim even though userspace lmkd can still act.
+		 * Panicking here is the direct trigger for the "open many
+		 * apps -> forced reboot" symptom. Instead, return false so
+		 * the allocator retries / falls back; the userspace watchdog
+		 * (or hardware watchdog) will handle a genuine deadlock with
+		 * a reboot that is no worse than the panic, while leaving an
+		 * adb/dmesg window for diagnosis.
 		 */
-		if (!is_sysrq_oom(oc) && !is_memcg_oom(oc))
-			panic("System is deadlocked on memory\n");
+		if (!is_sysrq_oom(oc) && !is_memcg_oom(oc)) {
+			pr_err("OOM: no killable process (all protected by oom_score_adj). "
+			       "Continuing without kill; userspace should handle.\n");
+			return false;
+		}
 	}
 	if (oc->chosen && oc->chosen != (void *)-1UL)
 		oom_kill_process(oc, !is_memcg_oom(oc) ? "Out of memory" :
@@ -1297,12 +1321,17 @@ put_task:
 
 void add_to_oom_reaper(struct task_struct *p)
 {
+	bool thaw = false;
+
 	p = find_lock_task_mm(p);
 	if (!p)
 		return;
 
 	if (task_will_free_mem(p)) {
 		__mark_oom_victim(p);
+		trace_android_vh_thaw_killed_process(&thaw);
+		if (thaw)
+			thaw_process(p);
 		queue_oom_reaper(p);
 	}
 	task_unlock(p);

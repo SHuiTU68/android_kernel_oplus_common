@@ -43,6 +43,7 @@
 #include <linux/migrate.h>
 #include <linux/delayacct.h>
 #include <linux/sysctl.h>
+#include <linux/sysinfo.h>
 #include <linux/memory-tiers.h>
 #include <linux/oom.h>
 #include <linux/pagevec.h>
@@ -150,6 +151,15 @@ struct scan_control {
 	/* The file folios on the current node are dangerously low */
 	unsigned int file_is_tiny:1;
 
+	/* The anonymous pages on the current node are below vm.anon_min_ratio */
+	unsigned int anon_below_min:1;
+
+	/* The clean file pages on the current node are below vm.clean_low_ratio */
+	unsigned int clean_below_low:1;
+
+	/* The clean file pages on the current node are below vm.clean_min_ratio */
+	unsigned int clean_below_min:1;
+
 	/* Always discard instead of demoting to lower tier memory */
 	unsigned int no_demotion:1;
 
@@ -204,6 +214,15 @@ struct scan_control {
  * From 0 .. MAX_SWAPPINESS.  Higher means more swappy.
  */
 int vm_swappiness = 60;
+
+int sysctl_workingset_protection __read_mostly = 1;
+u8 sysctl_anon_min_ratio  __read_mostly = CONFIG_ANON_MIN_RATIO;
+u8 sysctl_clean_low_ratio __read_mostly = CONFIG_CLEAN_LOW_RATIO;
+u8 sysctl_clean_min_ratio __read_mostly = CONFIG_CLEAN_MIN_RATIO;
+static u64 sysctl_anon_min_ratio_kb  __read_mostly;
+static u64 sysctl_clean_low_ratio_kb __read_mostly;
+static u64 sysctl_clean_min_ratio_kb __read_mostly;
+static u64 workingset_protection_prev_totalram __read_mostly;
 
 LIST_HEAD(shrinker_list);
 DECLARE_RWSEM(shrinker_rwsem);
@@ -1429,6 +1448,7 @@ static int __remove_mapping(struct address_space *mapping, struct folio *folio,
 	BUG_ON(!folio_test_locked(folio));
 	BUG_ON(mapping != folio_mapping(folio));
 
+	trace_android_vh_remove_mapping(mapping, folio, reclaimed);
 	if (!folio_test_swapcache(folio))
 		spin_lock(&mapping->host->i_lock);
 	xa_lock_irq(&mapping->i_pages);
@@ -1521,6 +1541,7 @@ cannot_free:
 	xa_unlock_irq(&mapping->i_pages);
 	if (!folio_test_swapcache(folio))
 		spin_unlock(&mapping->host->i_lock);
+	trace_android_vh_remove_mapping_failed(mapping, folio, reclaimed);
 	return 0;
 }
 
@@ -2000,6 +2021,7 @@ retry:
 #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 					if (nr_pages >= HPAGE_PMD_NR) {
 						count_vm_event(THP_SWPOUT_FALLBACK);
+						count_memcg_folio_events(folio, THP_SWPOUT_FALLBACK, 1);
 					}
 					count_mthp_stat(order, MTHP_STAT_SWPOUT_FALLBACK);
 #endif
@@ -3229,6 +3251,15 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
 	trace_android_rvh_set_balance_anon_file_reclaim(&balance_anon_file_reclaim);
 
 	/*
+	 * Force-scan anon if clean file pages is under vm.clean_low_ratio
+	 * or vm.clean_min_ratio.
+	 */
+	if (sc->clean_below_low || sc->clean_below_min) {
+		scan_balance = SCAN_ANON;
+		goto out;
+	}
+
+	/*
 	 * If there is enough inactive page cache, we do not reclaim
 	 * anything from the anonymous working right now. But when balancing
 	 * anon and page cache files for reclaim, allow swapping of anon pages
@@ -3375,7 +3406,97 @@ out:
 			BUG();
 		}
 
+		/*
+		 * Hard protection of the working set.
+		 * Don't reclaim anon/file pages when the amount is
+		 * below the watermark of the same type.
+		 */
+		if (file ? sc->clean_below_min : sc->anon_below_min)
+			scan = 0;
+
 		nr[lru] = scan;
+	}
+}
+
+int vm_workingset_protection_update_handler(struct ctl_table *table, int write,
+					     void *buffer, size_t *lenp,
+					     loff_t *ppos)
+{
+	int ret = proc_dou8vec_minmax(table, write, buffer, lenp, ppos);
+
+	if (ret || !write)
+		return ret;
+
+	workingset_protection_prev_totalram = 0;
+
+	return 0;
+}
+
+static void prepare_workingset_protection(pg_data_t *pgdat, struct scan_control *sc)
+{
+	unsigned long node_mem_total;
+	struct sysinfo i;
+
+	if (!sysctl_workingset_protection) {
+		sc->anon_below_min = 0;
+		sc->clean_below_low = 0;
+		sc->clean_below_min = 0;
+		return;
+	}
+
+	if (likely(sysctl_anon_min_ratio ||
+		   sysctl_clean_low_ratio ||
+		   sysctl_clean_min_ratio)) {
+#ifdef CONFIG_NUMA
+		si_meminfo_node(&i, pgdat->node_id);
+#else
+		si_meminfo(&i);
+#endif
+		node_mem_total = i.totalram;
+
+		if (unlikely(workingset_protection_prev_totalram != node_mem_total)) {
+			sysctl_anon_min_ratio_kb =
+				node_mem_total * sysctl_anon_min_ratio / 100;
+			sysctl_clean_low_ratio_kb =
+				node_mem_total * sysctl_clean_low_ratio / 100;
+			sysctl_clean_min_ratio_kb =
+				node_mem_total * sysctl_clean_min_ratio / 100;
+			workingset_protection_prev_totalram = node_mem_total;
+		}
+	}
+
+	if (sysctl_anon_min_ratio) {
+		unsigned long reclaimable_anon;
+
+		reclaimable_anon =
+			node_page_state(pgdat, NR_ACTIVE_ANON) +
+			node_page_state(pgdat, NR_INACTIVE_ANON) +
+			node_page_state(pgdat, NR_ISOLATED_ANON);
+
+		sc->anon_below_min = reclaimable_anon < sysctl_anon_min_ratio_kb;
+	} else {
+		sc->anon_below_min = 0;
+	}
+
+	if (sysctl_clean_low_ratio || sysctl_clean_min_ratio) {
+		unsigned long reclaimable_file, dirty, clean;
+
+		reclaimable_file =
+			node_page_state(pgdat, NR_ACTIVE_FILE) +
+			node_page_state(pgdat, NR_INACTIVE_FILE) +
+			node_page_state(pgdat, NR_ISOLATED_FILE);
+		dirty = node_page_state(pgdat, NR_FILE_DIRTY);
+
+		if (likely(reclaimable_file > dirty))
+			clean = reclaimable_file - dirty;
+		else
+			clean = 0;
+
+		sc->clean_below_low = clean < sysctl_clean_low_ratio_kb;
+		sc->clean_below_min = clean < sysctl_clean_min_ratio_kb;
+	} else {
+		sc->clean_below_low = 0;
+		sc->clean_below_min = 0;
 	}
 }
 
@@ -6729,6 +6850,7 @@ static void shrink_node_memcgs(pg_data_t *pgdat, struct scan_control *sc)
 		cond_resched();
 
 		trace_android_vh_shrink_node_memcgs(memcg, &skip);
+		trace_android_vh_should_memcg_bypass(memcg, sc->priority, &skip);
 		if (skip)
 			continue;
 
@@ -6785,6 +6907,8 @@ static void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
 	}
 
 	target_lruvec = mem_cgroup_lruvec(sc->target_mem_cgroup, pgdat);
+
+	prepare_workingset_protection(pgdat, sc);
 
 again:
 	memset(&sc->nr, 0, sizeof(sc->nr));
@@ -7293,6 +7417,18 @@ static bool throttle_direct_reclaim(gfp_t gfp_mask, struct zonelist *zonelist,
 
 	trace_android_vh_throttle_direct_reclaim_bypass(&bypass);
 	if (bypass)
+		goto out;
+
+	/*
+	 * Android tuning: do not throttle foreground tasks.
+	 * On phones, foreground allocations (SurfaceFlinger, app UI threads)
+	 * enter direct reclaim via GFP_KERNEL. The default killable wait
+	 * blocks them until kswapd makes progress, which under heavy memory
+	 * pressure causes multi-second UI freezes. Foreground tasks
+	 * (oom_score_adj <= 0) are allowed to proceed directly into
+	 * try_to_free_pages instead of blocking on pfmemalloc_wait.
+	 */
+	if (current->signal && current->signal->oom_score_adj <= 0)
 		goto out;
 
 	/* Account for the throttling */
