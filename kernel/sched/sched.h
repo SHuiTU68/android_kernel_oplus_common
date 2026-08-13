@@ -186,9 +186,14 @@ static inline int idle_policy(int policy)
 {
 	return policy == SCHED_IDLE;
 }
+
 static inline int fair_policy(int policy)
 {
+#ifdef CONFIG_HMBIRD_SCHED
+	return policy == SCHED_HMBIRD || policy == SCHED_NORMAL || policy == SCHED_BATCH;
+#else
 	return policy == SCHED_NORMAL || policy == SCHED_BATCH;
+#endif
 }
 
 static inline int rt_policy(int policy)
@@ -502,6 +507,13 @@ extern void set_task_rq_fair(struct sched_entity *se,
 static inline void set_task_rq_fair(struct sched_entity *se,
 			     struct cfs_rq *prev, struct cfs_rq *next) { }
 #endif /* CONFIG_SMP */
+#else /* CONFIG_FAIR_GROUP_SCHED */
+#ifdef CONFIG_HMBIRD_SCHED
+static inline int sched_group_set_shares(struct task_group *tg, unsigned long shares)
+{
+	return 0;
+}
+#endif
 #endif /* CONFIG_FAIR_GROUP_SCHED */
 
 #else /* CONFIG_CGROUP_SCHED */
@@ -3506,11 +3518,9 @@ end:
 static inline int mm_cid_get(struct rq *rq, struct mm_struct *mm)
 {
 	struct mm_cid __percpu *pcpu_cid = mm->pcpu_cid;
-	struct cpumask *cpumask;
 	int cid;
 
 	lockdep_assert_rq_held(rq);
-	cpumask = mm_cidmask(mm);
 	cid = __this_cpu_read(pcpu_cid->cid);
 	if (mm_cid_is_valid(cid)) {
 		mm_cid_snapshot_time(rq, mm);
@@ -3595,5 +3605,9 @@ static inline bool cpu_busy_with_softirqs(int cpu)
 	return false;
 }
 #endif /* CONFIG_RT_SOFTIRQ_AWARE_SCHED */
+
+#ifdef CONFIG_HMBIRD_SCHED
+#include "hmbird.h"
+#endif
 
 #endif /* _KERNEL_SCHED_SCHED_H */

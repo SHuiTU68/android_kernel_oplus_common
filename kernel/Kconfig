@@ -1,0 +1,1 @@
+source "kernel/oplus_cpu/Kconfig"

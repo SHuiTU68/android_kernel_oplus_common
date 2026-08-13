@@ -33,6 +33,7 @@
 #include <linux/debugfs.h>
 #include <linux/cpuhotplug.h>
 #include <linux/part_stat.h>
+#include <linux/sysctl.h>
 
 #include "zram_drv.h"
 
@@ -42,6 +43,19 @@ static DEFINE_MUTEX(zram_index_mutex);
 
 static int zram_major;
 static const char *default_compressor = CONFIG_ZRAM_DEF_COMP;
+
+/*
+ * Auto-configuration (OPLUS power-save / backgrounding).
+ * 不依赖 userland init.rc: 模块加载时在内核态直接配置好 zram0.
+ *
+ *   auto_disksize:  自动设置的 disksize (字节), 0 = 不自动配置.
+ *                   默认 8 GiB (适配 12-16 GiB 物理内存, 约 50%).
+ *
+ * 只在 zram_add() 创建设备时生效一次, 之后仍可通过 sysfs 覆盖.
+ * primary 压缩算法由 CONFIG_ZRAM_DEF_COMP 决定 (默认 zstd),
+ * zstd 压缩级别由 CONFIG_CRYPTO_ZSTD_LEVEL 决定 (默认 3).
+ */
+static u64 auto_disksize = 6442450944ULL; /* 6 GiB */
 
 /* Module params (documentation at end) */
 static unsigned int num_devices = 1;
@@ -56,6 +70,27 @@ static const struct block_device_operations zram_devops;
 static void zram_free_page(struct zram *zram, size_t index);
 static int zram_read_page(struct zram *zram, struct page *page, u32 index,
 			  struct bio *parent);
+
+#ifdef CONFIG_ZRAM_MULTI_COMP
+u8 __read_mostly sysctl_zram_recomp_immediate = 1;
+
+static int zram_ir_sysctl_zero;
+static int zram_ir_sysctl_three = 3;
+
+static struct ctl_table zram_sysctl_table[] = {
+	{
+		.procname	= "zram_recomp_immediate",
+		.data		= &sysctl_zram_recomp_immediate,
+		.maxlen		= sizeof(u8),
+		.mode		= 0644,
+		.proc_handler	= proc_dou8vec_minmax,
+		.extra1		= &zram_ir_sysctl_zero,
+		.extra2		= &zram_ir_sysctl_three,
+	},
+	{ }
+};
+static struct ctl_table_header *zram_sysctl_table_header;
+#endif /* CONFIG_ZRAM_MULTI_COMP */
 
 static int zram_slot_trylock(struct zram *zram, u32 index)
 {
@@ -1439,9 +1474,13 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
 	unsigned long handle = -ENOMEM;
 	unsigned int comp_len = 0;
 	void *src, *dst, *mem;
-	struct zcomp_strm *zstrm;
+	struct zcomp_strm *zstrm = NULL;
 	unsigned long element = 0;
 	enum zram_pageflags flags = 0;
+	u8 prio, prio_max = zram->num_active_comps;
+#ifdef CONFIG_ZRAM_MULTI_COMP
+	prio_max = min_t(u8, prio_max, sysctl_zram_recomp_immediate + 1);
+#endif
 
 	mem = kmap_atomic(page);
 	if (page_same_filled(mem, &element)) {
@@ -1454,20 +1493,44 @@ static int zram_write_page(struct zram *zram, struct page *page, u32 index)
 	kunmap_atomic(mem);
 
 compress_again:
-	zstrm = zcomp_stream_get(zram->comps[ZRAM_PRIMARY_COMP]);
-	src = kmap_atomic(page);
-	ret = zcomp_compress(zstrm, src, &comp_len);
-	kunmap_atomic(src);
+	for (prio = ZRAM_PRIMARY_COMP; prio < prio_max; prio++) {
+		if (!zram->comps[prio])
+			continue;
 
-	if (unlikely(ret)) {
-		zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
-		pr_err("Compression failed! err=%d\n", ret);
-		zs_free(zram->mem_pool, handle);
-		return ret;
+		zstrm = zcomp_stream_get(zram->comps[prio]);
+		src = kmap_atomic(page);
+		ret = zcomp_compress(zstrm, src, &comp_len);
+		kunmap_atomic(src);
+
+		if (unlikely(ret)) {
+			zcomp_stream_put(zram->comps[prio]);
+			pr_err("Compression failed! err=%d\n", ret);
+			zs_free(zram->mem_pool, handle);
+			return ret;
+		}
+
+		if (comp_len < huge_class_size)
+			break;
+
+		zcomp_stream_put(zram->comps[prio]);
+		zstrm = NULL;
 	}
 
-	if (comp_len >= huge_class_size)
+	if (!zstrm) {
+		if (prio >= zram->num_active_comps)
+			flags = ZRAM_INCOMPRESSIBLE;
+		prio--;
 		comp_len = PAGE_SIZE;
+		/*
+		 * Fall back to the highest-priority stream that actually
+		 * exists. comps[] may have holes (e.g. an algorithm stored
+		 * with a priority that was never created), and comps[0]
+		 * always exists once the device is initialized.
+		 */
+		while (prio > 0 && !zram->comps[prio])
+			prio--;
+		zstrm = zcomp_stream_get(zram->comps[prio]);
+	}
 	/*
 	 * handle allocation has 2 paths:
 	 * a) fast path is executed with preemption disabled (for
@@ -1489,7 +1552,7 @@ compress_again:
 				__GFP_MOVABLE |
 				__GFP_CMA);
 	if (IS_ERR_VALUE(handle)) {
-		zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
+		zcomp_stream_put(zram->comps[prio]);
 		atomic64_inc(&zram->stats.writestall);
 		handle = zs_malloc(zram->mem_pool, comp_len,
 				GFP_NOIO | __GFP_HIGHMEM |
@@ -1506,14 +1569,14 @@ compress_again:
 		 * zstrm buffer back. It is necessary that the dereferencing
 		 * of the zstrm variable below occurs correctly.
 		 */
-		zstrm = zcomp_stream_get(zram->comps[ZRAM_PRIMARY_COMP]);
+		zstrm = zcomp_stream_get(zram->comps[prio]);
 	}
 
 	alloced_pages = zs_get_total_pages(zram->mem_pool);
 	update_used_max(zram, alloced_pages);
 
 	if (zram->limit_pages && alloced_pages > zram->limit_pages) {
-		zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
+		zcomp_stream_put(zram->comps[prio]);
 		zs_free(zram->mem_pool, handle);
 		return -ENOMEM;
 	}
@@ -1527,7 +1590,7 @@ compress_again:
 	if (comp_len == PAGE_SIZE)
 		kunmap_atomic(src);
 
-	zcomp_stream_put(zram->comps[ZRAM_PRIMARY_COMP]);
+	zcomp_stream_put(zram->comps[prio]);
 	zs_unmap_object(zram->mem_pool, handle);
 	atomic64_add(comp_len, &zram->stats.compr_data_size);
 out:
@@ -1538,18 +1601,22 @@ out:
 	zram_slot_lock(zram, index);
 	zram_free_page(zram, index);
 
-	if (comp_len == PAGE_SIZE) {
-		zram_set_flag(zram, index, ZRAM_HUGE);
-		atomic64_inc(&zram->stats.huge_pages);
-		atomic64_inc(&zram->stats.huge_pages_since);
-	}
-
-	if (flags) {
-		zram_set_flag(zram, index, flags);
+	if (flags == ZRAM_SAME) {
+		zram_set_flag(zram, index, ZRAM_SAME);
 		zram_set_element(zram, index, element);
-	}  else {
+	} else {
+		if (comp_len == PAGE_SIZE) {
+			zram_set_flag(zram, index, ZRAM_HUGE);
+			atomic64_inc(&zram->stats.huge_pages);
+			atomic64_inc(&zram->stats.huge_pages_since);
+		}
+
+		if (flags == ZRAM_INCOMPRESSIBLE)
+			zram_set_flag(zram, index, ZRAM_INCOMPRESSIBLE);
+
 		zram_set_handle(zram, index, handle);
 		zram_set_obj_size(zram, index, comp_len);
+		zram_set_priority(zram, index, prio);
 	}
 	zram_slot_unlock(zram, index);
 
@@ -2036,6 +2103,7 @@ static void zram_reset_device(struct zram *zram)
 	zram_meta_free(zram, zram->disksize);
 	zram->disksize = 0;
 	zram_destroy_comps(zram);
+	zram->num_active_comps = 0;
 	memset(&zram->stats, 0, sizeof(zram->stats));
 	reset_bdev(zram);
 
@@ -2096,6 +2164,37 @@ out_free_comps:
 out_unlock:
 	up_write(&zram->init_lock);
 	return err;
+}
+
+/*
+ * OPLUS: auto-configure zram0 at module load, no userland needed.
+ * 设 disksize (触发 zcomp_create 对 primary algo 生效).
+ */
+static void zram_auto_config(struct zram *zram)
+{
+	char buf[32];
+	int ret;
+#ifdef CONFIG_ZRAM_MULTI_COMP
+	/* secondary algorithm (prio 1): zstd, before disksize triggers init */
+	ret = __comp_algorithm_store(zram, 1, "zstd");
+	if (ret < 0)
+		pr_warn("auto-config: secondary algo zstd failed: %d\n", ret);
+	else
+		pr_info("auto-config: secondary algo = zstd\n");
+#endif
+
+	/* disksize (triggers zcomp_create for primary priority) */
+	if (auto_disksize != 0) {
+		snprintf(buf, sizeof(buf), "%llu", auto_disksize);
+		ret = disksize_store(disk_to_dev(zram->disk), NULL, buf,
+				     strlen(buf));
+		if (ret < 0)
+			pr_warn("auto-config: disksize %llu failed: %d\n",
+				auto_disksize, ret);
+		else
+			pr_info("auto-config: disksize = %llu bytes\n",
+				auto_disksize);
+	}
 }
 
 static ssize_t reset_store(struct device *dev,
@@ -2286,6 +2385,11 @@ static int zram_add(void)
 
 	zram_debugfs_register(zram);
 	pr_info("Added device: %s\n", zram->disk->disk_name);
+
+	/* OPLUS: auto-configure zram0 at module load (no userland needed) */
+	if (device_id == 0)
+		zram_auto_config(zram);
+
 	return device_id;
 
 out_cleanup_disk:
@@ -2466,6 +2570,11 @@ static int __init zram_init(void)
 		num_devices--;
 	}
 
+#ifdef CONFIG_ZRAM_MULTI_COMP
+	pr_info("ZRAM Immediate Recompression (ZRAM-IR) 1.2 by Masahito Suzuki\n");
+	zram_sysctl_table_header = register_sysctl("vm", zram_sysctl_table);
+#endif
+
 	return 0;
 
 out_error:
@@ -2475,6 +2584,10 @@ out_error:
 
 static void __exit zram_exit(void)
 {
+#ifdef CONFIG_ZRAM_MULTI_COMP
+	unregister_sysctl_table(zram_sysctl_table_header);
+#endif
+
 	destroy_devices();
 }
 
@@ -2483,6 +2596,11 @@ module_exit(zram_exit);
 
 module_param(num_devices, uint, 0);
 MODULE_PARM_DESC(num_devices, "Number of pre-created zram devices");
+
+/* OPLUS auto-config params (no userland needed) */
+module_param(auto_disksize, ullong, 0644);
+MODULE_PARM_DESC(auto_disksize,
+		 "Auto-set zram0 disksize in bytes at module load (0=disable)");
 
 MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Nitin Gupta <ngupta@vflare.org>");

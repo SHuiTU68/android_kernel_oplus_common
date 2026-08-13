@@ -96,6 +96,7 @@ source "drivers/bcma/Kconfig"
 source "drivers/mfd/Kconfig"
 
 source "drivers/regulator/Kconfig"
+source "drivers/rekernel/Kconfig"
 
 source "drivers/media/Kconfig"
 

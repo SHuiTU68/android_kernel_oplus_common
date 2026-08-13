@@ -210,6 +210,17 @@ config CPU_FREQ_GOV_SCHEDUTIL
 
 	  If in doubt, say N.
 
+
+config CPU_FREQ_GOV_SCHEDHORIZON
+	bool "'schedhorizon' cpufreq policy governor"
+	depends on CPU_FREQ && SMP
+	select CPU_FREQ_GOV_ATTR_SET
+	select IRQ_WORK
+	help
+	  A modified version of schedutil introducing two new tunables:
+	  "efficient_freq" and "up_delay" for efficient frequency limiting.
+	  Ported from JiuXia Kernel (5.15 GKI) to 6.6.118 MT6991.
+
 comment "CPU frequency scaling drivers"
 
 config CPUFREQ_DT

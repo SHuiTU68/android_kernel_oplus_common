@@ -300,6 +300,11 @@ static int __ffs_ep0_queue_wait(struct ffs_data *ffs, char *data, size_t len)
 		req->buf = (void *)0xDEADBABE;
 
 	reinit_completion(&ffs->ep0req_completion);
+#ifdef OPLUS_FEATURE_CHG_BASIC
+/* Null pointer caused in special asynchronous operation */
+	if (ffs->gadget == NULL)
+		return -EINTR;
+#endif
 
 	ret = usb_ep_queue(ffs->gadget->ep0, req, GFP_ATOMIC);
 	if (ret < 0)
@@ -307,6 +312,11 @@ static int __ffs_ep0_queue_wait(struct ffs_data *ffs, char *data, size_t len)
 
 	ret = wait_for_completion_interruptible(&ffs->ep0req_completion);
 	if (ret) {
+#ifdef OPLUS_FEATURE_CHG_BASIC
+/* Null pointer caused in special asynchronous operation */
+		if (ffs->gadget == NULL)
+			return -EINTR;
+#endif
 		usb_ep_dequeue(ffs->gadget->ep0, req);
 		return -EINTR;
 	}
@@ -1941,7 +1951,12 @@ static int ffs_func_eps_enable(struct ffs_function *func)
 	ep = func->eps;
 	epfile = ffs->epfiles;
 	count = ffs->eps_count;
-	while(count--) {
+	if (!epfile) {
+		ret = -ENOMEM;
+		goto done;
+	}
+
+	while (count--) {
 		ep->ep->driver_data = ep;
 
 		ret = config_ep_by_speed(func->gadget, &func->function, ep->ep);
@@ -1965,6 +1980,7 @@ static int ffs_func_eps_enable(struct ffs_function *func)
 	}
 
 	wake_up_interruptible(&ffs->wait);
+done:
 	spin_unlock_irqrestore(&func->ffs->eps_lock, flags);
 
 	return ret;
