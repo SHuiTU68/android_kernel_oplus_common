@@ -113,6 +113,17 @@ enum mmc_err_stat {
 	MMC_ERR_MAX,
 };
 
+#ifdef CONFIG_MMC_PASSWORDS
+typedef struct mmc_sd_lock {
+#define MAX_UNLOCK_PASSWORD_WITH_BUF 20    	/* 1(len) + max_pwd(16) + 0xFF 0xFF + 0 = 20 */
+    bool swith_voltage;    /* whether sdcard voltage swith to 1.8v  */
+    bool auto_unlock;
+    u8 unlock_pwd[MAX_UNLOCK_PASSWORD_WITH_BUF];
+    int (*sysfs_add)(struct mmc_host *, struct mmc_card *card);
+    void (*sysfs_remove)(struct mmc_host *, struct mmc_card *card);
+}mmc_sd_lock;
+#endif
+
 struct mmc_host_ops {
 	/*
 	 * It is optional for the host to implement pre_req and post_req in
@@ -453,14 +464,12 @@ struct mmc_host {
 
 	struct mmc_ios		ios;		/* current io bus settings */
 
+	bool			claimed;	/* host exclusively claimed */
+
 	/* group bitfields together to minimize padding */
 	unsigned int		use_spi_crc:1;
-	unsigned int		claimed:1;	/* host exclusively claimed */
 	unsigned int		doing_init_tune:1; /* initial tuning in progress */
-	unsigned int		can_retune:1;	/* re-tuning can be used */
 	unsigned int		doing_retune:1;	/* re-tuning in progress */
-	unsigned int		retune_now:1;	/* do re-tuning at next req */
-	unsigned int		retune_paused:1; /* re-tuning is temporarily disabled */
 	unsigned int		retune_crc_disable:1; /* don't trigger retune upon crc */
 	unsigned int		can_dma_map_merge:1; /* merging can be used */
 	unsigned int		vqmmc_enabled:1; /* vqmmc regulator is enabled */
@@ -468,6 +477,9 @@ struct mmc_host {
 	int			rescan_disable;	/* disable card detection */
 	int			rescan_entered;	/* used with nonremovable devices */
 
+	bool			can_retune;	/* re-tuning can be used */
+	bool			retune_now;	/* do re-tuning at next req */
+	bool			retune_paused;	/* re-tuning is temporarily disabled */
 	int			need_retune;	/* re-tuning is needed */
 	int			hold_retune;	/* hold off re-tuning */
 	unsigned int		retune_period;	/* re-tuning period in secs */

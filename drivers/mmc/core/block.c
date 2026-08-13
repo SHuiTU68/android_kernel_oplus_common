@@ -816,9 +816,9 @@ static int mmc_blk_ioctl(struct block_device *bdev, blk_mode_t mode,
 		mmc_blk_put(md);
 		return ret;
 	case MMC_IOC_MULTI_CMD:
-		ret = mmc_blk_check_blkdev(bdev);
-		if (ret)
-			return ret;
+		/*ret = mmc_blk_check_blkdev(bdev);
+		*if (ret)
+		*	return ret;*/
 		md = mmc_blk_get(bdev->bd_disk);
 		if (!md)
 			return -EINVAL;
@@ -1036,6 +1036,15 @@ static int mmc_blk_reset(struct mmc_blk_data *md, struct mmc_host *host,
 		return -EEXIST;
 
 	md->reset_done |= type;
+#ifdef CONFIG_MMC_PASSWORDS
+        mmc_sd_lock *sdlock = (mmc_sd_lock *)host->android_kabi_reserved1;
+	/*if sd is unlock , set auto unlock flag , so system resume auto unlock sd card */
+	if(mmc_card_sd(host->card) && (!mmc_card_locked(host->card))) {
+		pr_err("%s: [SDLOCK] sdcard is unlocked on blk_reset and set auto_unlock = true. \n", mmc_hostname(host));
+		sdlock->auto_unlock = true;
+	}
+	host->card->state &= ~(MMC_STATE_LOCKED | MMC_STATE_ENCRYPT);
+#endif
 	err = mmc_hw_reset(host->card);
 	/*
 	 * A successful reset will leave the card in the main partition, but
@@ -1379,6 +1388,9 @@ static void mmc_blk_data_prep(struct mmc_queue *mq, struct mmc_queue_req *mqrq,
 		    rq_data_dir(req) == WRITE &&
 		    (md->flags & MMC_BLK_REL_WR);
 
+	if (mqrq->flags & MQRQ_XFER_SINGLE_BLOCK)
+		recovery_mode = 1;
+
 	memset(brq, 0, sizeof(struct mmc_blk_request));
 
 	mmc_crypto_prepare_req(mqrq);
@@ -1518,10 +1530,13 @@ static void mmc_blk_cqe_complete_rq(struct mmc_queue *mq, struct request *req)
 		err = 0;
 
 	if (err) {
-		if (mqrq->retries++ < MMC_CQE_RETRIES)
+		if (mqrq->retries++ < MMC_CQE_RETRIES) {
+			if (rq_data_dir(req) == WRITE)
+				mqrq->flags |= MQRQ_XFER_SINGLE_BLOCK;
 			blk_mq_requeue_request(req, true);
-		else
+		} else {
 			blk_mq_end_request(req, BLK_STS_IOERR);
+		}
 	} else if (mrq->data) {
 		if (blk_update_request(req, BLK_STS_OK, mrq->data->bytes_xfered))
 			blk_mq_requeue_request(req, true);
@@ -2059,6 +2074,8 @@ static void mmc_blk_mq_complete_rq(struct mmc_queue *mq, struct request *req)
 	} else if (!blk_rq_bytes(req)) {
 		__blk_mq_end_request(req, BLK_STS_IOERR);
 	} else if (mqrq->retries++ < MMC_MAX_RETRIES) {
+		if (rq_data_dir(req) == WRITE)
+			mqrq->flags |= MQRQ_XFER_SINGLE_BLOCK;
 		blk_mq_requeue_request(req, true);
 	} else {
 		if (mmc_card_removed(mq->card))

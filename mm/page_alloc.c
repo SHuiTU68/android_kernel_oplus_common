@@ -968,7 +968,7 @@ static inline void __free_one_page(struct page *page,
 		 * merge with it and move up one order.
 		 */
 		if (page_is_guard(buddy))
-			clear_page_guard(zone, buddy, order);
+			clear_page_guard(zone, buddy, order, migratetype);
 		else
 			__del_page_from_free_list(buddy, zone, order, buddy_mt);
 
@@ -1544,7 +1544,7 @@ static inline unsigned int expand(struct zone *zone, struct page *page, int low,
 		 * Corresponding page table entries will not be touched,
 		 * pages will stay not present in virtual address space
 		 */
-		if (set_page_guard(zone, &page[size], high))
+		if (set_page_guard(zone, &page[size], high, migratetype))
 			continue;
 
 		__add_to_free_list(&page[size], zone, high, migratetype, false);
@@ -7154,7 +7154,7 @@ static void break_down_buddy_pages(struct zone *zone, struct page *page,
 		}
 		page = next_page;
 
-		if (set_page_guard(zone, current_buddy, high))
+		if (set_page_guard(zone, current_buddy, high, migratetype))
 			continue;
 
 		if (current_buddy != target) {

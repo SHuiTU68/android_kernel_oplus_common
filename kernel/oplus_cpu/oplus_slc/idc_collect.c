@@ -23,7 +23,7 @@
 #include <linux/jiffies.h>
 
 #include <linux/cpufreq.h>
-#include "gpufreq_v2.h"
+#include "../../../drivers/gpu/mediatek/gpufreq/v2/include/gpufreq_v2.h"
 #include "../../../drivers/misc/mediatek/qos/mtk_qos_sram.h"
 #include "../../../drivers/misc/mediatek/qos/mtk_qos_share.h"
 #include "../../../drivers/misc/mediatek/qos/mtk_qos_ipi.h"

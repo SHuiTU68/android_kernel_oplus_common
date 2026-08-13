@@ -8,6 +8,7 @@
 #ifndef __ASM_TLBFLUSH_H
 #define __ASM_TLBFLUSH_H
 
+
 #ifndef __ASSEMBLY__
 
 #include <linux/bitfield.h>
@@ -16,6 +17,7 @@
 #include <linux/mmu_notifier.h>
 #include <asm/cputype.h>
 #include <asm/mmu.h>
+
 
 /*
  * Raw TLBI operations.
@@ -120,6 +122,32 @@ static inline unsigned long get_trans_granule(void)
 	if (arm64_kernel_unmapped_at_el0())				\
 		__tlbi_level(op, (arg | USER_ASID_FLAG), level);	\
 } while (0)
+
+#define __repeat_tlbi_sync(op, arg...)						\
+do {										\
+	if (!alternative_has_cap_unlikely(ARM64_WORKAROUND_REPEAT_TLBI))	\
+		break;								\
+	__tlbi(op, ##arg);							\
+	dsb(ish);								\
+} while (0)
+/*
+ * Complete broadcast TLB maintenance issued by the host which invalidates
+ * stage 1 information in the host's own translation regime.
+ */
+static inline void __tlbi_sync_s1ish(void)
+{
+	dsb(ish);
+	__repeat_tlbi_sync(vale1is, 0);
+}
+/*
+ * Complete broadcast TLB maintenance issued by hyp code which invalidates
+ * stage 1 translation information in any translation regime.
+ */
+static inline void __tlbi_sync_s1ish_hyp(void)
+{
+	dsb(ish);
+	__repeat_tlbi_sync(vale2is, 0);
+}
 
 /*
  * This macro creates a properly formatted VA operand for the TLB RANGE.

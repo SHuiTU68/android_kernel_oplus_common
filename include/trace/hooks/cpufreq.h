@@ -46,6 +46,7 @@ DECLARE_RESTRICTED_HOOK(android_rvh_cpufreq_transition,
 DECLARE_HOOK(android_vh_cpufreq_online,
 	TP_PROTO(struct cpufreq_policy *policy),
 	TP_ARGS(policy));
+
 DECLARE_RESTRICTED_HOOK(android_rvh_cpufreq_create_policy,
 	TP_PROTO(struct cpufreq_policy *policy),
 	TP_ARGS(policy), 1);

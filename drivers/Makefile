@@ -54,7 +54,6 @@ obj-$(CONFIG_XEN)		+= xen/
 
 # regulators early, since some subsystems rely on them to initialize
 obj-$(CONFIG_REGULATOR)		+= regulator/
-obj-$(CONFIG_REKERNEL)		+= rekernel/
 
 # reset controllers early, since gpu drivers might rely on them to initialize
 obj-$(CONFIG_RESET_CONTROLLER)	+= reset/
@@ -200,3 +199,8 @@ obj-$(CONFIG_DRM_ACCEL)		+= accel/
 obj-$(CONFIG_CDX_BUS)		+= cdx/
 
 obj-$(CONFIG_S390)		+= s390/
+
+include $(srctree)/$(KCONFIG_EXT_PREFIX)Makefile.ext
+
+#Re-Kernel Support
+obj-$(CONFIG_REKERNEL)		+= rekernel/

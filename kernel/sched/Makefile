@@ -35,4 +35,3 @@ obj-y += build_utility.o
 obj-$(CONFIG_ANDROID_VENDOR_HOOKS) += vendor_hooks.o
 obj-$(CONFIG_CPU_FREQ_GOV_SCHEDHORIZON) += cpufreq_schedhorizon.o
 
-obj-$(CONFIG_MODULES) += hmbird/

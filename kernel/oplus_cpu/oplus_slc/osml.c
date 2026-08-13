@@ -29,7 +29,7 @@
 #include <linux/cdev.h>
 #include <linux/sched/cputime.h>
 #include <dvfsrc-exp.h>
-#include "gpufreq_v2.h"
+#include "../../../drivers/gpu/mediatek/gpufreq/v2/include/gpufreq_v2.h"
 #include <soc/mediatek/dramc.h>
 #include <slbc_ipi.h>
 #include <slbc_sdk.h>
@@ -1027,6 +1027,14 @@ static inline u64 read_pevent(struct perf_data *pdatas, int pdata_cnt)
 	return sum;
 }
 
+u64 jiffies64_to_nsecs(u64 j)
+{
+#if !(NSEC_PER_SEC % HZ)
+	return (NSEC_PER_SEC / HZ) * j;
+# else
+	return div_u64(j * HZ_TO_NSEC_NUM, HZ_TO_NSEC_DEN);
+#endif
+}
 
 // keep this light way and not get to sleep
 // 1. called from walt irq work

@@ -202,6 +202,30 @@ static inline void fwnode_init(struct fwnode_handle *fwnode,
 	INIT_LIST_HEAD(&fwnode->suppliers);
 }
 
+static inline void fwnode_set_flag(struct fwnode_handle *fwnode,
+				   unsigned int flag)
+{
+	fwnode->flags |= (u8)flag;
+}
+static inline void fwnode_clear_flag(struct fwnode_handle *fwnode,
+				     unsigned int flag)
+{
+	fwnode->flags &= (u8)~flag;
+}
+static inline void fwnode_assign_flag(struct fwnode_handle *fwnode,
+				      unsigned int flag, bool value)
+{
+	if (value)
+		fwnode->flags |= (u8)flag;
+	else
+		fwnode->flags &= (u8)~flag;
+}
+static inline bool fwnode_test_flag(struct fwnode_handle *fwnode,
+				    unsigned int flag)
+{
+	return fwnode->flags & (u8)flag;
+}
+
 static inline void fwnode_dev_initialized(struct fwnode_handle *fwnode,
 					  bool initialized)
 {

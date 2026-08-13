@@ -468,7 +468,7 @@ int drm_mode_rmfb(struct drm_device *dev, u32 fb_id,
 		INIT_LIST_HEAD(&arg.fbs);
 		list_add_tail(&fb->filp_head, &arg.fbs);
 
-		schedule_work(&arg.work);
+		queue_work(system_highpri_wq, &arg.work);
 		flush_work(&arg.work);
 		destroy_work_on_stack(&arg.work);
 	} else

@@ -6314,7 +6314,6 @@ restart:
 #else
 	for_each_class(class) {
 		p = class->pick_next_task(rq);
-		trace_android_vh_chk_task(&p, rq);
 		if (p)
 			return p;
 	}
