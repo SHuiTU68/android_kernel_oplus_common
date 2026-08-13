@@ -1,0 +1,16 @@
+# ACLK 原版备份（本地保留，不入库）
+*.aclk.orig
+fs/f2fs.aclk.orig/
+
+# 构建产物
+*.o
+*.a
+*.ko
+*.cmd
+*.mod
+*.mod.c
+*.symtypes
+*.order
+*.markers
+*.tmp_versions/
+Module.symvers
